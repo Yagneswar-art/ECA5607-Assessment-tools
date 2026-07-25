@@ -1,0 +1,301 @@
+clc;
+clear;
+close all;
+
+%% ============================================================
+%  BER Performance Simulation of 2x2, 4x4 and 8x8 MIMO Systems
+%  Varying SNR, Modulation, Fading and Antenna Correlation
+% =============================================================
+
+%% Simulation Parameters
+Nt_values = [2 4 8];              % Number of Transmit Antennas
+Nr_values = [2 4 8];              % Number of Receive Antennas
+SNR_dB = 0:2:20;                  % SNR range in dB
+
+modulations = {'BPSK','QPSK','16QAM'};
+fading_types = {'Rayleigh','Rician'};
+correlation_values = [0 0.5 0.9];
+
+numBits = 1e5;                    % Number of bits per simulation
+
+%% ============================================================
+%  Main Simulation
+% =============================================================
+
+for modIndex = 1:length(modulations)
+
+    modulation = modulations{modIndex};
+
+    % Determine bits per symbol
+    switch modulation
+        case 'BPSK'
+            bitsPerSymbol = 1;
+        case 'QPSK'
+            bitsPerSymbol = 2;
+        case '16QAM'
+            bitsPerSymbol = 4;
+    end
+
+    fprintf('\n====================================\n');
+    fprintf('Modulation: %s\n', modulation);
+    fprintf('====================================\n');
+
+    for fadeIndex = 1:length(fading_types)
+
+        fading = fading_types{fadeIndex};
+
+        for corrIndex = 1:length(correlation_values)
+
+            rho = correlation_values(corrIndex);
+
+            figure;
+            hold on;
+            grid on;
+
+            legendText = {};
+
+            for antennaIndex = 1:length(Nt_values)
+
+                Nt = Nt_values(antennaIndex);
+                Nr = Nr_values(antennaIndex);
+
+                BER = zeros(1,length(SNR_dB));
+
+                %% Generate random bits
+                bits = randi([0 1], numBits, 1);
+
+                %% Modulation
+                txSymbols = modulateSignal(bits, modulation);
+
+                % Reshape symbols into Nt transmit streams
+                numSymbols = floor(length(txSymbols)/Nt)*Nt;
+                txSymbols = txSymbols(1:numSymbols);
+
+                txMatrix = reshape(txSymbols, Nt, []);
+
+                %% SNR Loop
+                for snrIndex = 1:length(SNR_dB)
+
+                    snrLinear = 10^(SNR_dB(snrIndex)/10);
+
+                    %% Generate MIMO Channel
+                    H = generateChannel(Nr, Nt, fading, rho);
+
+                    %% Generate received signal
+                    noise = (randn(Nr,size(txMatrix,2)) + ...
+                             1i*randn(Nr,size(txMatrix,2))) / sqrt(2);
+
+                    % Normalize channel
+                    H = H / sqrt(Nt);
+
+                    % Received signal
+                    Y = sqrt(snrLinear) * H * txMatrix + noise;
+
+                    %% ZF Detection
+                    W = pinv(H);
+
+                    detectedSymbols = W * Y;
+
+                    %% Scale back
+                    detectedSymbols = detectedSymbols / sqrt(snrLinear);
+
+                    %% Demodulation
+                    detectedBits = demodulateSignal( ...
+                        detectedSymbols(:), modulation);
+
+                    %% Match number of bits
+                    detectedBits = detectedBits(1:min(length(bits), ...
+                                      length(detectedBits)));
+
+                    originalBits = bits(1:length(detectedBits));
+
+                    %% Calculate BER
+                    BER(snrIndex) = ...
+                        sum(originalBits ~= detectedBits) / ...
+                        length(originalBits);
+
+                end
+
+                %% Plot BER
+                semilogy(SNR_dB, BER, '-o', ...
+                    'LineWidth', 1.5);
+
+                legendText{end+1} = ...
+                    sprintf('%dx%d MIMO', Nt, Nr);
+
+                fprintf('%s | %s | Correlation = %.1f | %dx%d MIMO\n', ...
+                    modulation, fading, rho, Nt, Nr);
+
+                fprintf('BER at 20 dB = %.5e\n', BER(end));
+
+            end
+
+            %% Plot Settings
+            xlabel('SNR (dB)');
+            ylabel('Bit Error Rate (BER)');
+
+            title(sprintf( ...
+                'BER vs SNR - %s MIMO - %s Fading - Correlation = %.1f', ...
+                modulation, fading, rho));
+
+            legend(legendText, 'Location', 'southwest');
+
+            ylim([1e-5 1]);
+
+            hold off;
+
+        end
+    end
+end
+
+
+%% ============================================================
+% Function 1: Modulation
+% =============================================================
+
+function symbols = modulateSignal(bits, modulation)
+
+    switch modulation
+
+        case 'BPSK'
+
+            symbols = 2*bits - 1;
+            symbols = complex(symbols);
+
+        case 'QPSK'
+
+            % Make number of bits even
+            if mod(length(bits),2) ~= 0
+                bits = [bits; 0];
+            end
+
+            bitPairs = reshape(bits,2,[]).';
+
+            I = 2*bitPairs(:,1)-1;
+            Q = 2*bitPairs(:,2)-1;
+
+            symbols = (I + 1i*Q)/sqrt(2);
+
+        case '16QAM'
+
+            % Make number of bits multiple of 4
+            remainder = mod(length(bits),4);
+
+            if remainder ~= 0
+                bits = [bits; zeros(4-remainder,1)];
+            end
+
+            bitGroups = reshape(bits,4,[]).';
+
+            % Gray coded 16-QAM mapping
+            I = 2*(2*bitGroups(:,1)+bitGroups(:,2))-3;
+            Q = 2*(2*bitGroups(:,3)+bitGroups(:,4))-3;
+
+            symbols = (I + 1i*Q)/sqrt(10);
+
+    end
+
+    symbols = symbols(:);
+
+end
+
+
+%% ============================================================
+% Function 2: Demodulation
+% =============================================================
+
+function bits = demodulateSignal(symbols, modulation)
+
+    switch modulation
+
+        case 'BPSK'
+
+            bits = real(symbols) > 0;
+            bits = bits(:);
+
+        case 'QPSK'
+
+            I = real(symbols) > 0;
+            Q = imag(symbols) > 0;
+
+            bits = zeros(2*length(symbols),1);
+
+            bits(1:2:end) = I;
+            bits(2:2:end) = Q;
+
+        case '16QAM'
+
+            % Undo normalization
+            symbols = symbols * sqrt(10);
+
+            I = real(symbols);
+            Q = imag(symbols);
+
+            bits = zeros(4*length(symbols),1);
+
+            % Decision levels
+            I_bits = zeros(length(symbols),2);
+            Q_bits = zeros(length(symbols),2);
+
+            % I decision
+            I_bits(I < -2,:) = repmat([0 0],sum(I < -2),1);
+            I_bits(I >= -2 & I < 0,:) = repmat([0 1],sum(I >= -2 & I < 0),1);
+            I_bits(I >= 0 & I < 2,:) = repmat([1 1],sum(I >= 0 & I < 2),1);
+            I_bits(I >= 2,:) = repmat([1 0],sum(I >= 2),1);
+
+            % Q decision
+            Q_bits(Q < -2,:) = repmat([0 0],sum(Q < -2),1);
+            Q_bits(Q >= -2 & Q < 0,:) = repmat([0 1],sum(Q >= -2 & Q < 0),1);
+            Q_bits(Q >= 0 & Q < 2,:) = repmat([1 1],sum(Q >= 0 & Q < 2),1);
+            Q_bits(Q >= 2,:) = repmat([1 0],sum(Q >= 2),1);
+
+            bits(1:4:end) = I_bits(:,1);
+            bits(2:4:end) = I_bits(:,2);
+            bits(3:4:end) = Q_bits(:,1);
+            bits(4:4:end) = Q_bits(:,2);
+
+    end
+
+    bits = double(bits(:));
+
+end
+
+
+%% ============================================================
+% Function 3: MIMO Channel Generation
+% =============================================================
+
+function H = generateChannel(Nr, Nt, fading, rho)
+
+    %% Independent Rayleigh channel
+    H0 = (randn(Nr,Nt) + ...
+          1i*randn(Nr,Nt))/sqrt(2);
+
+    %% Apply transmit antenna correlation
+    Rt = zeros(Nt,Nt);
+
+    for i = 1:Nt
+        for j = 1:Nt
+            Rt(i,j) = rho^abs(i-j);
+        end
+    end
+
+    %% Correlation matrix square root
+    Rt_sqrt = sqrtm(Rt);
+
+    %% Correlated channel
+    H = H0 * Rt_sqrt;
+
+    %% Rician Fading
+    if strcmp(fading,'Rician')
+
+        K = 5; % Rician K-factor
+
+        H_LOS = ones(Nr,Nt);
+
+        H = sqrt(K/(K+1))*H_LOS + ...
+            sqrt(1/(K+1))*H;
+
+    end
+
+end
